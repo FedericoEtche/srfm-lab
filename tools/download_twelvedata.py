@@ -3,13 +3,16 @@ Download hourly OHLCV data via Twelve Data API.
 Saves to tools/data_cache/ as CSVs — only downloads missing date ranges.
 Run once; backtester loads from cache after that.
 """
-import requests
-import pandas as pd
-import time
-from pathlib import Path
 from datetime import datetime, timedelta
+import os
+from pathlib import Path
+import time
 
-API_KEY  = "77fca7a68e094ce391da80169260878e"
+import pandas as pd
+import requests
+
+# Credentials are read from the environment — never hardcode keys in source.
+API_KEY  = os.environ.get("TWELVEDATA_API_KEY", "")
 BASE_URL = "https://api.twelvedata.com/time_series"
 
 SYMBOLS = {
@@ -128,6 +131,11 @@ def load_cached(sym_label: str) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
+    if not API_KEY:
+        raise SystemExit(
+            "Set the TWELVEDATA_API_KEY environment variable with your Twelve Data "
+            "credentials before running."
+        )
     print("Downloading hourly data via Twelve Data...\n")
     for label, ticker in SYMBOLS.items():
         download_symbol(label, ticker)

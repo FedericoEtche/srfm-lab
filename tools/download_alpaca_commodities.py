@@ -3,14 +3,17 @@ Download commodity ETF proxy data via Alpaca.
 USO=CL, GLD=GC, TLT=ZB, UNG=NG, VIXY=VX
 Saves to tools/data_cache/ as CSVs.
 """
-import requests
-import pandas as pd
-import time
-from pathlib import Path
 from datetime import datetime, timedelta
+import os
+from pathlib import Path
+import time
 
-API_KEY    = "PKAJISZM3NEO654DQSLPG35I33"
-SECRET_KEY = "Eusa11jFafE5UPuJX8GQs7uHeZLXhdCcgzSFGJbsY5Z1"
+import pandas as pd
+import requests
+
+# Credentials are read from the environment — never hardcode keys in source.
+API_KEY    = os.environ.get("APCA_API_KEY_ID", "")
+SECRET_KEY = os.environ.get("APCA_API_SECRET_KEY", "")
 BASE_URL   = "https://data.alpaca.markets/v2/stocks"
 
 SYMBOLS = {
@@ -106,6 +109,11 @@ def download_symbol(sym_label: str, ticker: str, timeframe: str):
 
 
 if __name__ == "__main__":
+    if not API_KEY or not SECRET_KEY:
+        raise SystemExit(
+            "Set APCA_API_KEY_ID and APCA_API_SECRET_KEY environment variables "
+            "with your Alpaca credentials before running."
+        )
     print("Downloading commodity ETF proxies from Alpaca...\n")
     for label, ticker in SYMBOLS.items():
         print(f"{label} ({ticker}):")
