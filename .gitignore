@@ -82,3 +82,10 @@ idea-engine/**/*.db
 idea-engine/**/*.log
 tools/.env
 **/.env
+
+# Runtime state — untracked in CI repair phase 1 (files stay local, out of git)
+execution/*.db
+spacetime/db/*.db
+btc_live.json
+backups/
+unsloth_compiled_cache/

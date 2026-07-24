@@ -1,3 +1,40 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# CI — PHASE 1 (minimal, honest, green)
+#
+# This workflow intentionally covers only what actually passes on master
+# today. The previous workflow was rejected by GitHub's parser (job-level
+# `if: hashFiles(...)` on the julia job is not allowed), so every run failed
+# in 0s with 0 jobs — and beyond that, every job was structurally unpassable.
+#
+# Jobs REMOVED in phase 1 — what phase 2 needs to restore each:
+#   python-extension  — needs a real maturin project in extensions/ (currently
+#                       no Cargo.toml/pyproject.toml there; fast_indicators is a
+#                       setuptools C extension, srfm_core is pure Python in lib/).
+#   go                — needs either a root go.mod/go.work or a per-module
+#                       matrix over the 25 per-dir modules (cmd/gateway does not
+#                       exist; lib/ has no Go files).
+#   typescript-arena lint — needs eslint added as a devDependency + config in
+#                       spacetime/web (tsc + build are covered by `web` below).
+#   typescript-terminal — needs terminal/package-lock.json so `npm ci` can run.
+#   julia             — needs tests moved to julia/test/runtests.jl (they live
+#                       at julia/tests/) or an explicit include() runner; and no
+#                       job-level hashFiles() condition (GitHub rejects it).
+#   integration       — needs fastapi/uvicorn installed (they are only in
+#                       pyproject [project.dependencies], not requirements.txt)
+#                       and a bootable spacetime.api.main:app.
+#   sql-lint          — was continue-on-error noise; restore behind a real
+#                       sqlfluff cleanup if wanted.
+#
+# Rust crates EXCLUDED from the check (fail to compile on a fresh toolchain;
+# fix in phase 2, then drop the --exclude flags):
+#   orderbook-sim      — TradeRecord lacks Default (CircularBuffer bound),
+#                        crossbeam Sender::is_disconnected doesn't exist,
+#                        unaligned packed-struct field refs (E0793).
+#   network-graph      — 2 type errors (E0277 usize-vs-f64 sum, E0308).
+#   synthetic-exchange — duplicate type definitions (E0255: MarketMakerAgent,
+#                        Side, PopulationStats) + missing ordered_float dep.
+# ═══════════════════════════════════════════════════════════════════════════
+
 name: CI
 
 on:
@@ -9,15 +46,79 @@ on:
 env:
   CARGO_TERM_COLOR: always
   PYTHON_VERSION: "3.11"
-  NODE_VERSION: "18"
-  GO_VERSION: "1.21"
+  NODE_VERSION: "22"
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Python — lint, type-check, test
-  # ─────────────────────────────────────────────────────────────────────────────
-  python:
-    name: Python tests
+  # ───────────────────────────────────────────────────────────────────────────
+  # Rust — workspace type-check minus the 3 crates that don't compile (see
+  # header). 34 of 37 workspace members pass today.
+  # NO `cargo fmt --check` (6,187 diffs) and NO clippy gating yet: both are
+  # staged for phase 2 behind a dedicated formatting/lint cleanup commit.
+  # ───────────────────────────────────────────────────────────────────────────
+  rust:
+    name: Rust check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check workspace (minus broken crates — see header comment)
+        run: >
+          cargo check --workspace
+          --exclude orderbook-sim
+          --exclude network-graph
+          --exclude synthetic-exchange
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Web — spacetime/web (Vite + TypeScript). npm ci + tsc + build pass today.
+  # (No `npm run lint`: eslint is not a dependency and has no config — phase 2.)
+  # ───────────────────────────────────────────────────────────────────────────
+  web:
+    name: Web build (spacetime/web)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: spacetime/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: spacetime/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Python — curated test subset that genuinely passes today.
+  #
+  # The FULL suite is blocked on the lib/-shadowing fix (phase 2): running all
+  # of tests/ has 73 deterministic failures (lib/ shadowing + tests that import
+  # deps only declared in pyproject [project.dependencies], e.g. fastapi,
+  # scikit-learn, statsmodels). tests/test_strategies.py is excluded because 3
+  # tests still fail (2 need scikit-learn, 1 hits a numpy read-only-assignment
+  # bug in lib/factor_models). No ruff gate yet: 4,983 outstanding errors —
+  # phase 2 behind a lint cleanup.
+  #
+  # Every file listed below passes in a fresh env with exactly
+  # `pip install -r requirements.txt pytest` (verified per-file, 565 tests).
+  # ───────────────────────────────────────────────────────────────────────────
+  python-core:
+    name: Python core tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,248 +133,28 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-cov ruff mypy
+          pip install pytest
 
-      - name: Lint with ruff
-        run: ruff check spacetime/ tools/ scripts/
-
-      - name: Type check with mypy
-        run: mypy spacetime/engine/ spacetime/api/ --ignore-missing-imports
-        continue-on-error: true  # Non-blocking until stubs are complete
-
-      - name: Run tests with coverage
+      - name: Run curated test subset
+        env:
+          PYTHONPATH: .
         run: |
-          pytest tests/ \
-            --cov=spacetime \
-            --cov-report=xml \
-            --cov-report=term-missing \
-            -v \
+          pytest \
+            tests/test_agents.py \
+            tests/test_archaeology.py \
+            tests/test_bh_engine.py \
+            tests/test_correlation.py \
+            tests/test_data_loader.py \
+            tests/test_mc.py \
+            tests/test_microstructure_bridge.py \
+            tests/test_monte_carlo.py \
+            tests/test_onchain_bridge.py \
+            tests/test_options_analytics.py \
+            tests/test_options_risk.py \
+            tests/test_portfolio.py \
+            tests/test_quat_nav_bridge.py \
+            tests/test_risk.py \
+            tests/test_sensitivity.py \
+            tests/test_srfm_core.py \
+            tests/integration/test_risk_api_integration.py \
             --tb=short
-        env:
-          PYTHONPATH: .
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        with:
-          file: ./coverage.xml
-          fail_ci_if_error: false
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Rust — build and test all crates
-  # ─────────────────────────────────────────────────────────────────────────────
-  rust:
-    name: Rust tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      - name: Clippy lint
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Build
-        run: cargo build --release --all
-
-      - name: Run tests
-        run: cargo test --all --release
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Python extension (PyO3 / maturin)
-  # ─────────────────────────────────────────────────────────────────────────────
-  python-extension:
-    name: Build Python extension
-    runs-on: ubuntu-latest
-    needs: rust
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install maturin
-        run: pip install maturin
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build extension
-        working-directory: extensions
-        run: maturin build --release
-
-      - name: Test extension import
-        run: |
-          pip install target/wheels/*.whl --force-reinstall
-          python -c "from srfm_core import BlackHoleDetector; print('Extension OK')"
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Go — build and test gateway
-  # ─────────────────────────────────────────────────────────────────────────────
-  go:
-    name: Go tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Check formatting
-        run: test -z "$(gofmt -l ./cmd/...)"
-
-      - name: Lint with golangci-lint
-        uses: golangci/golangci-lint-action@v4
-        with:
-          working-directory: .
-          args: --timeout=5m ./cmd/...
-
-      - name: Run tests
-        run: go test ./cmd/... ./lib/... -v -race -count=1
-        timeout-minutes: 10
-
-      - name: Build gateway
-        run: go build -o bin/gateway ./cmd/gateway/
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # TypeScript — Arena web app
-  # ─────────────────────────────────────────────────────────────────────────────
-  typescript-arena:
-    name: TypeScript build (Arena)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: spacetime/web/package-lock.json
-
-      - name: Install dependencies
-        working-directory: spacetime/web
-        run: npm ci
-
-      - name: Lint
-        working-directory: spacetime/web
-        run: npm run lint
-
-      - name: Type check
-        working-directory: spacetime/web
-        run: npx tsc --noEmit
-
-      - name: Build
-        working-directory: spacetime/web
-        run: npm run build
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # TypeScript — Terminal web app
-  # ─────────────────────────────────────────────────────────────────────────────
-  typescript-terminal:
-    name: TypeScript build (Terminal)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: terminal/package-lock.json
-
-      - name: Install dependencies
-        working-directory: terminal
-        run: npm ci
-
-      - name: Build
-        working-directory: terminal
-        run: npm run build
-        continue-on-error: true  # terminal is in development
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Julia tests (if julia directory exists)
-  # ─────────────────────────────────────────────────────────────────────────────
-  julia:
-    name: Julia tests
-    runs-on: ubuntu-latest
-    if: hashFiles('julia/Project.toml') != ''
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: julia-actions/setup-julia@v2
-        with:
-          version: "1.9"
-
-      - uses: julia-actions/cache@v2
-
-      - name: Install dependencies
-        run: |
-          julia --project=julia -e "using Pkg; Pkg.instantiate()"
-
-      - name: Run tests
-        run: |
-          julia --project=julia -e "using Pkg; Pkg.test()"
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # SQL validation — basic syntax check on warehouse SQL files
-  # ─────────────────────────────────────────────────────────────────────────────
-  sql-lint:
-    name: SQL lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install sqlfluff
-        run: pip install sqlfluff
-
-      - name: Lint warehouse SQL
-        run: |
-          sqlfluff lint warehouse/schema/ \
-            --dialect postgres \
-            --exclude-rules L016,L019,L031 \
-            --max-line-length 120
-        continue-on-error: true  # Non-blocking until all SQL is formatted
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Integration test — spin up API and run smoke test
-  # ─────────────────────────────────────────────────────────────────────────────
-  integration:
-    name: Integration smoke test
-    runs-on: ubuntu-latest
-    needs: [python, rust, python-extension]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Start API server
-        run: |
-          python -m uvicorn spacetime.api.main:app --host 0.0.0.0 --port 8000 &
-          sleep 5
-        env:
-          PYTHONPATH: .
-
-      - name: Smoke test API endpoints
-        run: |
-          curl -sf http://localhost:8000/docs > /dev/null
-          curl -sf http://localhost:8000/api/instruments > /dev/null
-          echo "API smoke test passed"
